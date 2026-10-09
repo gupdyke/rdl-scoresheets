@@ -33,6 +33,38 @@ function matchURL(m, download) {
 }
 const matchFile = (m) => (m.pdf ? m.pdf.split("/").pop() : null);
 
+// On a phone, a PDF link opens a viewer with no way back (none at all from a home-screen
+// icon) and doesn't download. So there Download opens the share sheet with the PDF
+// attached instead: Save to Files, Print, AirDrop, Messages. The share sheet only opens
+// straight from a tap, so each shown match's PDF is fetched ahead of time.
+const shareSheet = CFG.public && matchMedia("(pointer: coarse)").matches && !!navigator.canShare &&
+  navigator.canShare({ files: [new File([""], "x.pdf", { type: "application/pdf" })] });
+const pdfFiles = new Map();   // url -> Promise<File>
+function pdfFile(m) {
+  const url = matchURL(m, true);
+  if (!pdfFiles.has(url)) {
+    const p = fetch(url).then((r) => {
+      if (!r.ok) throw new Error(r.status);
+      return r.blob();
+    }).then((b) => new File([b], matchFile(m), { type: "application/pdf" }));
+    p.catch(() => pdfFiles.delete(url));   // try again on the next tap
+    pdfFiles.set(url, p);
+  }
+  return pdfFiles.get(url);
+}
+async function sharePDF(m, button) {
+  const text = button.textContent;
+  try {
+    const file = await pdfFile(m);
+    await navigator.share({ files: [file], title: file.name });
+  } catch (e) {
+    if (e.name === "AbortError") return;   // closed the share sheet
+    // NotAllowedError: the PDF was still loading, so the tap had expired. It's here now.
+    button.textContent = e.name === "NotAllowedError" ? "Ready: tap again" : "Couldn't load it: tap to retry";
+    setTimeout(() => { button.textContent = text; }, 4000);
+  }
+}
+
 function fill(select, items, value) {
   select.replaceChildren(...items.map(([v, t]) => el("option", { value: v }, t)));
   if (value != null && items.some(([v]) => String(v) === String(value))) select.value = value;
@@ -51,6 +83,10 @@ function syncURL() {
 function matchCard(m, mine) {
   const dl = el("a", { className: "button", href: matchURL(m, true) }, "Download (Front + Back)");
   if (CFG.public) dl.download = matchFile(m);
+  if (shareSheet) {
+    pdfFile(m);
+    dl.addEventListener("click", (e) => { e.preventDefault(); sharePDF(m, dl); });
+  }
   return el("div", { className: `match${mine ? " mine" : ""}` },
     mine ? el("p", { className: "tag-mine" }, "Your match") : null,
     el("h3", {}, label(m.home), el("span", { className: "vs" }, " (home) vs "), label(m.away)),
